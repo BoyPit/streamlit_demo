@@ -12,6 +12,7 @@ from langchain_community.vectorstores.neo4j_vector import Neo4jVector
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores.neo4j_vector import remove_lucene_chars
 from entities import Entities
+from typing import List, Tuple, Any, Annotated
 
 
 
@@ -33,7 +34,7 @@ def generate_full_text_query(input: str) -> str:
     return full_text_query.strip()
 
 # Full-text index query with the new entity structure
-def structured_retriever(question: str, graph) -> str:
+async def structured_retriever(question: str, graph) -> str:
     """
     Collects the neighborhood of entities mentioned
     in the question by querying the Neo4j graph database,
@@ -67,30 +68,67 @@ def structured_retriever(question: str, graph) -> str:
 
     # Step 2: Define a function to handle querying for each entity type
     def query_graph_for_entity(entity: str, graph) -> str:
+        # Execute the query using LangChain's graph.query to retrieve nodes and their neighbors
         response = graph.query(
-            """CALL db.index.fulltext.queryNodes('LE06_index', $query, {limit:2})
+            """
+            CALL db.index.fulltext.queryNodes('LE06_index', $query, {limit:6})
             YIELD node, score
-            CALL {
-              WITH node
-              MATCH (node)-[r:!MENTIONS]->(neighbor)
-              RETURN node AS source_node, r, neighbor
-              UNION ALL
-              WITH node
-              MATCH (node)<-[r:!MENTIONS]-(neighbor)
-              RETURN neighbor AS source_node, r, node AS neighbor
-            }
-            RETURN source_node, r, neighbor, score LIMIT 50
+            WITH node, score
+            MATCH (node)-[r:MENTIONS]->(neighbor)
+            RETURN node AS source_node, r, neighbor, score
+
+            UNION ALL
+
+            CALL db.index.fulltext.queryNodes('LE06_index', $query, {limit:6})
+            YIELD node, score
+            WITH node, score
+            MATCH (node)<-[r:MENTIONS]-(neighbor)
+            RETURN node AS source_node, r, neighbor, score
+
+            LIMIT 50
             """,
             {"query": generate_full_text_query(entity)},
         )
-        output = []
+        
+        # Build a hierarchical structure from the relationships
+        hierarchy = {}
+
         for el in response:
-            source_node_props = ", ".join([f"{k}: {v}" for k, v in el['source_node'].items()])
-            neighbor_props = ", ".join([f"{k}: {v}" for k, v in el['neighbor'].items()])
-            output.append(
-                f"Node: {el['source_node']['id']} ({source_node_props}) - {type(el['r'])} -> Neighbor: {el['neighbor']['id']} ({neighbor_props}) (Score: {el['score']})"
-            )
-        return "\n".join(output) + "\n"
+            source_node = el["source_node"]
+            neighbor = el["neighbor"]
+            
+            # Get node properties to create readable keys
+            source_id = source_node.get("id", "N/A")
+            source_props = ", ".join([f"{k}: {v}" for k, v in source_node.items()])
+            source_key = f"Node {source_id} ({source_props})"
+            
+            neighbor_id = neighbor.get("id", "N/A")
+            neighbor_props = ", ".join([f"{k}: {v}" for k, v in neighbor.items()])
+            neighbor_key = f"Neighbor {neighbor_id} ({neighbor_props})"
+            
+            if source_key not in hierarchy:
+                hierarchy[source_key] = {}
+            
+            # Create a structure with neighbor details under each source node
+            hierarchy[source_key][neighbor_key] = f"Score: {el['score']}"
+        
+        # Function to recursively build the text representation
+        def build_context(hierarchy_level, indent=0):
+            text = ""
+            for node_key, children in hierarchy_level.items():
+                indentation = "  " * indent
+                text += f"{indentation}- {node_key}\n"
+                if isinstance(children, dict):
+                    text += build_context(children, indent + 1)
+                else:
+                    text += f"{indentation}  {children}\n"  # Direct score display for leaf nodes
+            return text
+
+        # Build and return the context
+        context = "Entity Structure:\n\n"
+        context += build_context(hierarchy)
+        return context
+
     
     # Step 3: Query for each type of entity extracted and append results to the final output
     if entities.machines:
@@ -127,20 +165,41 @@ def structured_retriever(question: str, graph) -> str:
 
 
 # Wrapper for transforming retriever function with store and graph as constants
-def create_retriever(store, graph):
-    async def retriever(question:  Annotated[str, "Key word to retrieve in the database"]) -> str:
-        print(f"Search query: {question}")
-        structured_data = structured_retriever(question, graph)
-        if structured_data != "":
-            unstructured_data = [el.page_content for el in store.similarity_search(question)]
-            final_data = f"""Structured data:
+def create_retriever(store, graph, score_threshold: float = 0.8, top_k: int = 2):
+    async def retriever(question: Annotated[str, "Keyword to retrieve in the database"]) -> str:
+        print(f"Received query: {question}")
+        
+        # Retrieve structured data from the knowledge graph
+        structured_data = await structured_retriever(question, graph)
+        
+        if not structured_data:
+            print("No structured data found. Proceeding with unstructured data only.")
+            structured_data = "No relevant structured data found."
+
+        # Retrieve unstructured data with relevance scores
+        unstructured_data_with_scores: List[Tuple[Any, float]] = await store.asimilarity_search_with_relevance_scores(
+            question, k=top_k, score_threshold=score_threshold
+        )
+
+        # Filter documents based on relevance score
+        relevant_unstructured_data = [
+            f"(Score: {score:.2f}) {doc.page_content}" for doc, score in unstructured_data_with_scores if score >= score_threshold
+        ]
+
+        # Format the response (without f-string for multiline)
+        final_data = """
+        Structured Data:
         {structured_data}
-        Unstructured data:
-        {"#Document ".join(unstructured_data)}
-            """
-            return final_data
-        else:
-            return ""
+
+        Unstructured Data (Relevance Scores):
+        {documents}
+        """.format(
+            structured_data=structured_data,
+            documents="\n#Document ".join(relevant_unstructured_data)
+        )
+        
+        return final_data.strip()
+    
     return retriever
 
 

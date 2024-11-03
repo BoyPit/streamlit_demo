@@ -17,6 +17,9 @@ from typing import List
 # Pre-hashing all plain text passwords once
 
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI"]["API_KEY"]
+os.environ["NEO4J_URI"] =st.secrets["NEO4J"]["NEO4J_URI"] 
+os.environ["NEO4J_USERNAME"] = st.secrets["NEO4J"]["NEO4J_USERNAME"]
+os.environ["NEO4J_PASSWORD"] = st.secrets["NEO4J"]["NEO4J_PASSWORD"] 
 
 authenticator = stauth.Authenticate(
     dict(st.secrets['credentials']),
@@ -36,17 +39,8 @@ def add_new_action(action_name):
         st.session_state["action"].append(action_name)
 
 with st.sidebar:
-    st.write("# AutoGen Chat Agents")
+    st.write("# IndusGen Assist")
     # Display checkboxes for each action
-    for action in st.session_state["action"]:
-        # Define a unique key for each checkbox
-        key = f"checkbox_{action}"
-        
-        # Render the checkbox with the default value from session state, if exists
-        st.checkbox(action, key=key, value=st.session_state.get(key, False))
-
-    # Collect and display selected actions
-    selected_actions = [action for action in st.session_state["action"] if st.session_state.get(f"checkbox_{action}", False)]
 
     if st.session_state['authentication_status']:
             st.write(f'Welcome *{st.session_state["name"]}*')
@@ -54,20 +48,28 @@ with st.sidebar:
             col1, col2, col3 = st.columns(3)
             col1.metric("Message token", st.session_state["data"], st.session_state["variation"])
             col2.metric("AI Agent", 2)
-            col3.metric("Humidity", "86%", "4%")
+            col3.metric("Power", "86%", "4%")
+            for action in st.session_state["action"]:
+            # Define a unique key for each checkbox
+                key = f"checkbox_{action}"
+                
+                # Render the checkbox with the default value from session state, if exists
+                st.checkbox(action, key=key, value=st.session_state.get(key, False))
 
+        # Collect and display selected actions
+            selected_actions = [action for action in st.session_state["action"] if st.session_state.get(f"checkbox_{action}", False)]
 
 if "variation" not in st.session_state:
     st.session_state["variation"] = 0  # Initial value
 
 
-# try:
-#     authenticator.login()
-# except Exception as e:
-#     st.error(e)
+try:
+     authenticator.login()
+except Exception as e:
+     st.error(e)
 
-#if st.session_state['authentication_status']:
-if True:
+if st.session_state['authentication_status']:
+
 
     # Initialisez les messages si ce n'est pas déjà fait
     if "messages" not in st.session_state:
@@ -90,7 +92,71 @@ if True:
         graph, store = initialize_neo4j_vector("LE06")
         retriever = create_retriever(store,graph)
 
-        
+        def query_graph_for_composant() -> str:
+            response = graph.query(
+                """
+                MATCH (n:Composant)-[r]->(m:Composant)
+                WHERE n.machine_id = $machine_id
+                RETURN n AS source_node, type(r) AS relationship_type, r, m AS neighbor
+                LIMIT 100
+                """,
+                {"machine_id": "LE06"}
+            )
+            
+            output = []
+            for el in response:
+                # Extraire seulement les propriétés requises
+                source_node_props = ", ".join([f"{k}: {v}" for k, v in el['source_node'].items() if k in {'type', 'nom', 'id'}])
+                neighbor_props = ", ".join([f"{k}: {v}" for k, v in el['neighbor'].items() if k in {'type', 'nom', 'id'}])
+                relationship_type = el['relationship_type']
+                
+                output.append(
+                    f"Node: {el['source_node']['id']} ({source_node_props}) - [{relationship_type}] -> Neighbor: {el['neighbor']['id']} ({neighbor_props})"
+                )
+                
+            return "\n".join(output) + "\n"
+        def query_graph_for_machine_structure() -> str:
+            # Execute the query using LangChain's graph.query
+        # Execute the query to get all paths from the machine to connected nodes
+            response = graph.query(
+                """
+                MATCH path = (machine:Machine {machine_id: "LE06_struct"})-[*]->(connected)
+                WHERE NOT "Failure" IN labels(connected) AND NOT "Action" IN labels(connected)
+                RETURN [node IN nodes(path) | {id: id(node), labels: labels(node), properties: properties(node)}] AS nodes
+                """
+            )
+            
+            # Build a hierarchical structure from the paths
+            hierarchy = {}
+
+            for record in response:
+                nodes = record["nodes"]
+                # Build the hierarchy from the path
+                current_level = hierarchy
+                for node in nodes:
+                    node_id = node["id"]
+                    node_name = node["properties"].get("name", f"Node_{node_id}")
+                    node_labels = node["labels"]
+                    key = f"{node_name} ({', '.join(node_labels)})"
+                    if key not in current_level:
+                        current_level[key] = {}
+                    current_level = current_level[key]
+
+            # Function to recursively build the text representation
+            def build_context(hierarchy_level, indent=0):
+                text = ""
+                for node_key, children in hierarchy_level.items():
+                    indentation = "  " * indent
+                    text += f"{indentation}- {node_key}\n"
+                    if children:
+                        text += build_context(children, indent + 1)
+                return text
+
+            context = "Machine Structure:\n\n"
+            context += build_context(hierarchy)
+            return context
+
+
         class TrackableUserProxyAgent(UserProxyAgent):
             def _process_received_message(self, message, sender, silent):
                 if st.session_state["manager"].last_speaker is not None and st.session_state["manager"].last_speaker== st.session_state["incident_analyzer"]:
@@ -112,11 +178,11 @@ if True:
         user_proxy = TrackableUserProxyAgent(name="user", description="It's the final user", human_input_mode="NEVER", code_execution_config=False, max_consecutive_auto_reply=0)
         st.session_state["user_proxy"] = user_proxy
         incident_analyzer = autogen.AssistantAgent(name="incident_analyzer",system_message = f"""
-You are a highly skilled industrial maintenance technician on the field. Your mission is to quickly and effectively troubleshoot equipment breakdowns under urgent conditions.
-
-To ensure you have a thorough understanding of the situation before beginning your investigation, start with a brief Q&A session. Ask the technician the following questions to gather essential details:
+You are a highly skilled industrial maintenance technician on the field, expert on the machine LE06. Your mission is to quickly and effectively troubleshoot equipment breakdowns under urgent conditions.
 
 Q&A Phase with Technician:
+
+To ensure you have a thorough understanding of the situation before beginning your investigation, start with a brief Q&A session. Ask the technician the following questions to gather essential details:
 
 "Can you describe the symptoms or changes in the equipment’s behavior?"
 "When did you first notice the issue?"
@@ -126,28 +192,72 @@ Q&A Phase with Technician:
 "Are there any noticeable environmental factors (temperature, humidity, power fluctuations) that might be affecting the equipment?"
 "Are there specific components or sections of the equipment where the issue seems more pronounced?"
 "Have there been similar issues with this equipment in the past?"
-After collecting answers to these questions, proceed with diagnosing and resolving the issue using the following troubleshooting methods:
+Available Resources:
 
-Immediate Observation: Quickly assess the situation by observing the equipment and noting any obvious signs of malfunction.
-5 Whys: Ask "Why?" repeatedly to drill down to the root cause.
+Hierarchical Structure of Machine LE06: You have access to the detailed hierarchical structure of Machine LE06, which includes Machines, Functions, SubFunctions, Components, Tenants, and Aboutissants. This structure outlines how the machine is organized and how each component relates to the overall operation.
+
 Equipment Manuals and Schematics: Refer to documentation for troubleshooting tips and component details.
-Symptom-to-Cause Mapping: Link observed symptoms to possible causes based on your experience.
-Prioritization: Focus on the most critical issues that impact safety and production.
-Communication with Control Systems: Use diagnostic tools and interfaces to retrieve error codes and system statuses.
-Component Testing: Perform quick tests on suspect components using available tools (e.g., multimeter, pressure gauge).
-Safety Protocols: Always ensure that safety procedures are followed to protect yourself and others.
+
+Available Tools:
+
+query_graph_for_composant: Use this tool to get the exhaustive list of components of the LE06 machine. Ensure that you retrieve and reference all relevant components, using their exact names, to aid in accurate identification on the field.
+
+query_graph_for_machine_structure: Use this tool to retrieve the machine structure of the LE06.
+
+retriever: Use this tool to find specific data in the LE06 knowledge graph, which can be relevant or not.
+
+action_plan_builder: Use this tool to display the action plan for the user.
+
 Your Task:
 
-Use the information from the Q&A phase to guide your analysis and address the most probable causes first.
-Troubleshoot and fix the issue step-by-step, prioritizing efficiency and safety.
-Provide clear and concise instructions at each step, referencing specific components or areas of the equipment for inspection and repair.
+Analyze Information from Q&A:
+
+Use the technician's responses to identify relevant Functions and SubFunctions where the issue is occurring.
+Map the symptoms to specific Components, Tenants, and Aboutissants within those functions.
+Understand the Hierarchical Structure:
+
+Before using any tools, thoroughly review and comprehend the hierarchical structure of Machine LE06.
+Use this understanding to logically deduce potential areas of malfunction based on the symptoms described.
+Exhaustive Component Identification:
+
+Use the query_graph_for_composant tool to retrieve an exhaustive list of components related to the identified functions and subfunctions.
+Ensure that you include all relevant components, providing their exact names and any identifiers to aid technicians in the field.
+Component names are crucial for accurate identification; be meticulous in listing them.
+Troubleshooting Steps:
+
+Immediate Observation: Quickly assess the identified areas for obvious signs of malfunction.
+Symptom-to-Cause Mapping: Use your understanding of the hierarchical structure and the exhaustive component list to link observed symptoms to possible causes.
+Root Cause Analysis: Apply the 5 Whys technique within the context of the hierarchy to drill down to the root cause.
+Component Testing: Focus on suspect components using available tools (e.g., multimeter, pressure gauge).
+Prioritization: Address issues that impact safety and production first.
+Communication with Control Systems: Check for error codes or system statuses related to the identified components.
+Provide Clear Instructions:
+
+At each step, give concise instructions, referencing specific components by their exact names and identifiers for inspection and repair.
+Ensure that component names are accurately communicated to avoid any confusion on the field.
+Request Additional Information:
+
+If you need more details about specific components, use the retriever tool to find specific data in the LE06 knowledge graph.
+Safety Protocols:
+
+Ensure all safety procedures are strictly followed to protect yourself and others.
 Guidelines:
 
-Keep your actions practical and focused on actionable steps.
-If additional details about the equipment’s structure or components are needed, request data from the executor agent, which can pull information from the graph RAG database.
-Your goal is to restore equipment functionality promptly while maintaining safety standards.
-Maintain clear and straightforward communication to support quick comprehension and action.
-Once the task is completed, generate a detailed action plan with your tool action_plan_builder and report back to the user_proxy.
+Comprehend the Hierarchy First: Prioritize understanding the hierarchical structure to logically deduce potential issues before using any tools.
+
+Exhaustive Component Listing: Use the query_graph_for_composant tool to obtain a complete list of components, ensuring that all relevant components are considered during troubleshooting.
+
+Emphasize Component Names: Component names are critical for technicians to identify the correct parts on the field. Always provide exact and accurate component names and identifiers.
+
+Leverage the Tools Appropriately: Utilize the available tools effectively to gather necessary information and resolve the issue promptly.
+
+Stay Practical: Keep your actions focused on actionable and efficient steps.
+
+Maintain Clear Communication: Use straightforward language for quick comprehension.
+
+Goal-Oriented: Aim to restore equipment functionality promptly while upholding safety standards.
+
+Action Plan Creation: Once the task is completed, generate a detailed action plan using the action_plan_builder tool and report back to the user_proxy.
 """,
                                                                  llm_config=llm_config,
         )
@@ -165,14 +275,26 @@ Once the task is completed, generate a detailed action plan with your tool actio
             for action_name in action_plan.steps:
                 add_new_action(action_name)
                 
-     
-                   
+        register_function(
+            query_graph_for_composant,
+            caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
+            executor=machine_structure,  # The user proxy agent can execute the calculator calls.
+            name="query_graph_for_composant",  # By default, the function name is used as the tool name.
+            description="Use to get composant list of the LE06",  # A description of the tool.
+        )
+        register_function(
+            query_graph_for_machine_structure,
+            caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
+            executor=machine_structure,  # The user proxy agent can execute the calculator calls.
+            name="query_graph_for_machine_structure",  # By default, the function name is used as the tool name.
+            description="Use to get the machine structure of the LE06",  # A description of the tool.
+        )               
         register_function(
             retriever,
             caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
             executor=machine_structure,  # The user proxy agent can execute the calculator calls.
             name="retriever",  # By default, the function name is used as the tool name.
-            description="Use to find data in the LE06 knowledge graph",  # A description of the tool.
+            description="Use to find specific data in the LE06 knowledge graph can be relevant or not",  # A description of the tool.
         )
         register_function(
             action_plan_builder,

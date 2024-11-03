@@ -47,3 +47,5 @@ data/
 
 # Ignore other IDE settings
 .idea/
+
+.cache/
