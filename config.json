@@ -1,0 +1,33 @@
+{
+    "height": "700",
+
+    "physics": {
+      "enabled": true,
+      "solver": "barnesHut",
+      "minVelocity": 0,
+      "maxVelocity": 50,
+      "stabilization": {
+        "enabled": true,
+        "fit": true
+      },
+      "timestep": 0.3,
+      
+      "repulsion": {
+        "nodeDistance": 1500,
+        "centralGravity": 0.2,
+        "springLength": 50,
+        "springConstant": 0.05,
+        "damping": 0.8
+      },
+      "barnesHut": {
+        "theta": 0.5,
+        "gravitationalConstant": -3000000,
+        "centralGravity": 0.2,
+        "springLength": 30,
+        "springConstant": 0.2,
+        "damping": 1,
+        "avoidOverlap": 1
+      }
+    }
+  }
+  

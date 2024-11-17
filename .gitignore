@@ -43,7 +43,6 @@ data/
 *.csv
 *.db
 *.sqlite3
-*.json
 
 # Ignore other IDE settings
 .idea/
