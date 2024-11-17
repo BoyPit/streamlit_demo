@@ -13,9 +13,12 @@ from autogen.agentchat.contrib.society_of_mind_agent import SocietyOfMindAgent  
 from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 from typing import List
-
+import streamlit
+from streamlit_agraph import agraph, Node, Edge, Config
 # Pre-hashing all plain text passwords once
-
+from typing import Optional
+import pandas as pd
+import numpy as np
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI"]["API_KEY"]
 os.environ["NEO4J_URI"] =st.secrets["NEO4J"]["NEO4J_URI"] 
 os.environ["NEO4J_USERNAME"] = st.secrets["NEO4J"]["NEO4J_USERNAME"]
@@ -28,27 +31,172 @@ authenticator = stauth.Authenticate(
     st.secrets['cookie']['expiry_days'],
 )
 
+def query_graph_for_node_number( node_label="Function", machine_id="LE06_struct"):
+    query = f"""
+    MATCH (c:{node_label})
+    WHERE c.machine_id = "{machine_id}"
+    RETURN count(c) AS totalComponents;
+    """
+
+    response = st.session_state['graph'].query(query)
+    if response and isinstance(response, list) and 'totalComponents' in response[0]:
+        return int(response[0]['totalComponents'])
+    else:
+        return 0
+
+
+if "graph" not in st.session_state and "store" not in st.session_state:
+    st.session_state['graph'], st.session_state['store'] = initialize_neo4j_vector("LE06")
+
+if "retriever" not in st.session_state :
+    st.session_state['retriever'] = create_retriever(st.session_state['store'],st.session_state['graph'])
+
 if "data" not in st.session_state:
     st.session_state["data"] = 0  # Initial value
 
 if "action" not in st.session_state:
     st.session_state["action"] = []  # Initial value
 
+# Initialize session state for nodes and edges if not already set
+if "nodes" not in st.session_state:
+    st.session_state["nodes"] = []
+
+if "edges" not in st.session_state:
+    with st.spinner("Loading..."):
+
+        st.session_state["edges"] = []
+        response = st.session_state['graph'].query(
+    """
+    MATCH path = (machine:Machine {machine_id: "LE06_struct"})-[rel*]->(connected)
+    WHERE 
+        NOT "Failure" IN labels(connected) AND 
+        NOT "Action" IN labels(connected) AND
+        ALL(node IN nodes(path) WHERE NOT "Component" IN labels(node))
+    RETURN 
+        [node IN nodes(path) | {id: elementId(node), labels: labels(node), properties: properties(node)}] AS nodes,
+        [rel IN relationships(path) | {
+            id: elementId(rel),
+            type: type(rel),
+            properties: properties(rel),
+            source: elementId(startNode(rel)),
+            target: elementId(endNode(rel))
+        }] AS relationships
+            """
+        )
+
+        # Utiliser des ensembles pour vérifier l'existence des nœuds et des relations
+        existing_node_ids = {node.id for node in st.session_state["nodes"]}
+        existing_edges = {(edge.source, edge.target, edge.label) for edge in st.session_state["edges"]}
+
+        # Iterate over the response and create nodes and edges
+        for record in response:
+            nodes = record['nodes']
+            relationships = record['relationships']
+            for i, node in enumerate(nodes):
+                node_id = node['id']
+                node_name = node['properties'].get('name', 'Unknown')
+                level = i  # Use the index as a level to maintain hierarchy
+
+                # Add node if not already in the session state
+                if node_id not in existing_node_ids:
+                    st.session_state["nodes"].append(Node(
+                        id=node_id,
+                        label=node_name,
+                        size=50,
+                        shape="Circle",
+                        group=node['labels'][0],
+                        scaling={
+                            "min" : 50,
+                            "max" : 150,
+                            "label": {
+                                "enabled": True,
+                                "min": 30,
+                                "max": 60,
+
+                            },
+                        },
+                        font= {
+
+                            "size": 14,
+
+                        },
+                        widthConstraint={
+                            "minimum": 70,
+                            "maximum" : 70
+                        },
+                        heightConstraint={
+                            "minimum": 70,
+                            "maximum" : 70
+                        },
+                        level=level  # Assign the level to keep the hierarchy
+                    ))
+                    existing_node_ids.add(node_id)
+
+            # Create edges from the relationships data
+            for i in range(len(nodes) - 1):
+                st.session_state["edges"].append(Edge(
+                    source=nodes[i]['id'],
+                    target=nodes[i + 1]['id'],
+                    label=relationships[i]['type'] if i < len(relationships) else "connected"
+                ))
+    # Ensure the agraph configuration is initialized
+if "config" not in st.session_state:
+    st.session_state["config"] =     config=Config(from_json='config.json')
+
+if "component_number" not in st.session_state:
+   st.session_state["component_number"] = query_graph_for_node_number( node_label="Component", machine_id="LE06_struct")
+
+if "function_number" not in st.session_state:
+   st.session_state["function_number"] = query_graph_for_node_number( node_label="Function", machine_id="LE06_struct")
+
+if "subfunction_number" not in st.session_state:
+   st.session_state["subfunction_number"] = query_graph_for_node_number( node_label="SubFunction", machine_id="LE06_struct")
+
 def add_new_action(action_name):
     if action_name not in st.session_state["action"]:
         st.session_state["action"].append(action_name)
 
-with st.sidebar:
-    st.write("# IndusGen Assist")
-    # Display checkboxes for each action
+if "suspected_components" not in st.session_state:
 
+    st.session_state["suspected_components"] = []
+
+if "suspected_subfunction" not in st.session_state:
+   st.session_state["suspected_subfunction"] = ""
+
+if "suspected_function" not in st.session_state:
+   st.session_state["suspected_function"] = ""
+
+with st.sidebar:
     if st.session_state['authentication_status']:
-            st.write(f'Welcome *{st.session_state["name"]}*')
+        st.write("# IndusGen Assist")
+        st.write(f'Welcome *{st.session_state["name"]}*')
+        st.divider()
+        st.write("# Depannage Analyse")
+        col1, col2= st.columns(2)
+        col1.metric("Function", st.session_state["suspected_function"])
+        col2.metric("Sous-Function", st.session_state["suspected_subfunction"])
+        st.table(pd.DataFrame(st.session_state["suspected_components"], columns=["Composant suspecté"]))
+        st.divider()
+        st.write("# LE06 Graph")
+
+            # You can call any Streamlit command, including custom components:
+        # Display checkboxes for each action
+        with st.container():
+            st.session_state["agraph"] = agraph(
+                            nodes=st.session_state["nodes"],
+                            edges=st.session_state["edges"],
+                            config=st.session_state["config"]
+                    )
+
+
+        with st.container():
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Function", st.session_state["function_number"])
+            col2.metric("Sous-Function", st.session_state["subfunction_number"])
+            col3.metric("Composant", st.session_state["component_number"])
             authenticator.logout()
             col1, col2, col3 = st.columns(3)
-            col1.metric("Message token", st.session_state["data"], st.session_state["variation"])
-            col2.metric("AI Agent", 2)
-            col3.metric("Power", "86%", "4%")
+
             for action in st.session_state["action"]:
             # Define a unique key for each checkbox
                 key = f"checkbox_{action}"
@@ -89,11 +237,10 @@ if st.session_state['authentication_status']:
                 }
             ]
         }
-        graph, store = initialize_neo4j_vector("LE06")
-        retriever = create_retriever(store,graph)
+
 
         def query_graph_for_composant() -> str:
-            response = graph.query(
+            response = st.session_state['graph'].query(
                 """
                 MATCH (n:Composant)-[r]->(m:Composant)
                 WHERE n.machine_id = $machine_id
@@ -102,7 +249,6 @@ if st.session_state['authentication_status']:
                 """,
                 {"machine_id": "LE06"}
             )
-            
             output = []
             for el in response:
                 # Extraire seulement les propriétés requises
@@ -118,7 +264,7 @@ if st.session_state['authentication_status']:
         def query_graph_for_machine_structure() -> str:
             # Execute the query using LangChain's graph.query
         # Execute the query to get all paths from the machine to connected nodes
-            response = graph.query(
+            response = st.session_state['graph'].query(
                 """
                 MATCH path = (machine:Machine {machine_id: "LE06_struct"})-[*]->(connected)
                 WHERE NOT "Failure" IN labels(connected) AND NOT "Action" IN labels(connected)
@@ -142,6 +288,7 @@ if st.session_state['authentication_status']:
                         current_level[key] = {}
                     current_level = current_level[key]
 
+
             # Function to recursively build the text representation
             def build_context(hierarchy_level, indent=0):
                 text = ""
@@ -155,7 +302,74 @@ if st.session_state['authentication_status']:
             context = "Machine Structure:\n\n"
             context += build_context(hierarchy)
             return context
+        class NodeModel(BaseModel):
+            id: str = Field(..., description="Unique identifier for the node")
+            label: Optional[str] = Field(None, description="Label for the node")
+            size: Optional[int] = Field(None, description="Size of the node")
+            color: Optional[str] = Field(None, description="Color of the node")
+            x: Optional[float] = Field(None, description="X coordinate")
+            y: Optional[float] = Field(None, description="Y coordinate")
+            shape: Optional[str] = Field(None, description="Shape of the node")
+            title: Optional[str] = Field(None, description="Title for hover text")
 
+            class Config:
+                arbitrary_types_allowed = True
+
+        class EdgeModel(BaseModel):
+            source: str = Field(..., description="Source node ID")
+            target: str = Field(..., description="Target node ID")
+            label: Optional[str] = Field(None, description="Label of the edge")
+            type: Optional[str] = Field(None, description="Type of the edge")
+            color: Optional[str] = Field(None, description="Color of the edge")
+            width: Optional[int] = Field(None, description="Width of the edge")
+
+            class Config:
+                arbitrary_types_allowed = True
+
+        def add_To_Decision_graph(
+            nodes: Annotated[List[NodeModel], "An array of Nodes to Add to the graph"],
+            edges: Annotated[List[EdgeModel], "An array of Relations Between Decision nodes"]
+        ) -> str:
+            # No need to re-instantiate NodeModel objects since they are already of type NodeModel
+            node_objects = [NodeModel(**node) for node in nodes]
+
+            # Map 'from' and 'to' to 'source' and 'target' for EdgeModel
+            edge_objects = [
+                EdgeModel(
+                    source=edge['from'],
+                    target=edge['to'],
+                    **{k: v for k, v in edge.items() if k not in ['from', 'to']}
+                )
+                for edge in edges
+            ]
+
+            # Proceed to add nodes and edges to the session state
+            for node in node_objects:
+                new_node = Node(id=node.id, label=node.label)
+                st.session_state["nodes"].append(new_node)
+
+            for edge in edge_objects:
+                new_edge = Edge(source=edge.source, target=edge.target, label=edge.label)
+                st.session_state["edges"].append(new_edge)
+
+            # Update the graph in session state
+            st.session_state["agraph"] = agraph(
+                nodes=st.session_state["nodes"],
+                edges=st.session_state["edges"],
+                config=st.session_state["config"]
+            )
+
+            return "Graph updated successfully."
+        def update_interface(
+            components: Annotated[List[str], "List of supected component"],
+            subfunction: Annotated[str, "The subfunction suspected"],
+            function: Annotated[str, "The function suspected"]
+
+        ) -> str: 
+            st.session_state["suspected_components"] = components
+            st.session_state["suspected_subfunction"] = subfunction
+            st.session_state["suspected_function"] = function
+            return "Update done"
 
         class TrackableUserProxyAgent(UserProxyAgent):
             def _process_received_message(self, message, sender, silent):
@@ -169,7 +383,7 @@ if st.session_state['authentication_status']:
                     st.session_state["data"] = size
                 
                 return super()._process_received_message(message, sender, silent)
-        
+            
         machine_structure =autogen.AssistantAgent(name="executor", system_message="Use to execute code or function",
         llm_config=False
         )
@@ -258,6 +472,8 @@ Maintain Clear Communication: Use straightforward language for quick comprehensi
 Goal-Oriented: Aim to restore equipment functionality promptly while upholding safety standards.
 
 Action Plan Creation: Once the task is completed, generate a detailed action plan using the action_plan_builder tool and report back to the user_proxy.
+
+Update the interface at each step of the troubleshooting
 """,
                                                                  llm_config=llm_config,
         )
@@ -274,13 +490,27 @@ Action Plan Creation: Once the task is completed, generate a detailed action pla
             st.session_state["action"] = []
             for action_name in action_plan.steps:
                 add_new_action(action_name)
-                
+
+        register_function(
+            update_interface,
+            caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
+            executor=machine_structure,  # The user proxy agent can execute the calculator calls.
+            name="update_interface",  # By default, the function name is used as the tool name.
+            description="Use to update the interface",  # A description of the tool.
+        )
         register_function(
             query_graph_for_composant,
             caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
             executor=machine_structure,  # The user proxy agent can execute the calculator calls.
             name="query_graph_for_composant",  # By default, the function name is used as the tool name.
             description="Use to get composant list of the LE06",  # A description of the tool.
+        )
+        register_function(
+            add_To_Decision_graph,
+            caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
+            executor=machine_structure,  # The user proxy agent can execute the calculator calls.
+            name="add_To_Decision_graph",  # By default, the function name is used as the tool name.
+            description="Use to display each troubleshooting information step in a graph for the user",  # A description of the tool.
         )
         register_function(
             query_graph_for_machine_structure,
@@ -290,7 +520,7 @@ Action Plan Creation: Once the task is completed, generate a detailed action pla
             description="Use to get the machine structure of the LE06",  # A description of the tool.
         )               
         register_function(
-            retriever,
+            st.session_state['retriever'],
             caller=incident_analyzer,  # The assistant agent can suggest calls to the calculator.
             executor=machine_structure,  # The user proxy agent can execute the calculator calls.
             name="retriever",  # By default, the function name is used as the tool name.
@@ -304,7 +534,7 @@ Action Plan Creation: Once the task is completed, generate a detailed action pla
             description="Use to display the action plan for the user",  # A description of the tool.
         )
         register_function(
-            retriever,
+            st.session_state['retriever'],
             caller=help_desk,  # The assistant agent can suggest calls to the calculator.
             executor=machine_structure,  # The user proxy agent can execute the calculator calls.
             name="retriever",  # By default, the function name is used as the tool name.
