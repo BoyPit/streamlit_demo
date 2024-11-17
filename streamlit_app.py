@@ -61,6 +61,9 @@ if "action" not in st.session_state:
 if "nodes" not in st.session_state:
     st.session_state["nodes"] = []
 
+if 'is_chat_input_disabled' not in st.session_state:
+    st.session_state["is_chat_input_disabled"] = False
+
 if "edges" not in st.session_state:
     with st.spinner("Loading..."):
 
@@ -575,12 +578,12 @@ Update the interface at each step of the troubleshooting
 
     # Fonction principale de Streamlit
     def main():
-        if prompt := st.chat_input():
+        if prompt := st.chat_input("⚙️ Saisissez votre requête de diagnostic", disabled=st.session_state["is_chat_input_disabled"]):
             # Envoie le message de l'utilisateur et récupère la réponse de l'assistant
-            st.session_state.messages.append({"name":"user_proxy", "content": prompt})
-            st.chat_message("user_proxy").write(prompt)
-            st.session_state["user_proxy"].send(prompt, st.session_state["manager"])
-
+            with st.spinner("🔧 Analyse des systèmes en cours par l'IA..."):
+                st.session_state.messages.append({"name":"user_proxy", "content": prompt})
+                st.chat_message("user_proxy").write(prompt)
+                st.session_state["user_proxy"].send(prompt, st.session_state["manager"])
     if __name__ == "__main__":
         main()
 
